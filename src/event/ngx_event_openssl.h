@@ -99,6 +99,21 @@ struct ngx_ssl_connection_s {
     unsigned                    in_early:1;
     unsigned                    early_preread:1;
     unsigned                    write_blocked:1;
+
+#if OPENSSL_VERSION_NUMBER >= 0x10101000L
+
+    size_t                      ciphers_sz;
+    unsigned short             *ciphers;
+
+    size_t                      extensions_size;
+    int                        *extensions;
+
+    size_t                      curves_sz;
+    unsigned short             *curves;
+
+    size_t                      point_formats_sz;
+    unsigned char              *point_formats;
+#endif
 };
 
 
@@ -261,6 +276,10 @@ ngx_int_t ngx_ssl_get_client_v_start(ngx_connection_t *c, ngx_pool_t *pool,
 ngx_int_t ngx_ssl_get_client_v_end(ngx_connection_t *c, ngx_pool_t *pool,
     ngx_str_t *s);
 ngx_int_t ngx_ssl_get_client_v_remain(ngx_connection_t *c, ngx_pool_t *pool,
+    ngx_str_t *s);
+ngx_int_t ngx_ssl_get_extensions(ngx_connection_t *c, ngx_pool_t *pool,
+    ngx_str_t *s);
+ngx_int_t ngx_ssl_get_elliptic_curve_point_formats(ngx_connection_t *c, ngx_pool_t *pool,
     ngx_str_t *s);
 
 

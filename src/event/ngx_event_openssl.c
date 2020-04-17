@@ -1588,6 +1588,105 @@ ngx_ssl_set_session(ngx_connection_t *c, ngx_ssl_session_t *session)
     return NGX_OK;
 }
 
+#if OPENSSL_VERSION_NUMBER >= 0x10101000L
+
+void
+ngx_SSL_client_features(ngx_connection_t *c)
+{
+    unsigned short                *ciphers_out = NULL;
+    int                           *curves_out = NULL;
+    int                           *point_formats_out = NULL;
+    size_t                         len = 0;
+    SSL                           *s = NULL;
+
+    if (c == NULL) {
+        return;
+    }
+    s = c->ssl->connection;
+
+    /* Cipher suites */
+    c->ssl->ciphers = NULL;
+    c->ssl->ciphers_sz = SSL_get0_raw_cipherlist(s, &ciphers_out);
+    c->ssl->ciphers_sz /= 2;
+
+    if (c->ssl->ciphers_sz && ciphers_out) {
+        len = c->ssl->ciphers_sz * sizeof(unsigned short);
+        c->ssl->ciphers = ngx_pnalloc(c->pool, len);
+        ngx_memcpy(c->ssl->ciphers, ciphers_out, len);
+    }
+
+    /* Elliptic curve points */
+    c->ssl->curves_sz = SSL_get1_curves(s, NULL);
+    if (c->ssl->curves_sz) {
+        curves_out = OPENSSL_malloc(c->ssl->curves_sz * sizeof(int));
+        if (curves_out != NULL) {
+            SSL_get1_curves(s, curves_out);
+            len = c->ssl->curves_sz * sizeof(unsigned short);
+            c->ssl->curves = ngx_pnalloc(c->pool, len);
+            if (c->ssl->curves != NULL) {
+                for (size_t i = 0; i < c->ssl->curves_sz; i++) {
+                     c->ssl->curves[i] = curves_out[i];
+                }
+            }
+            OPENSSL_free(curves_out);
+        }
+    }
+
+    /* Elliptic curve point formats */
+    c->ssl->point_formats_sz = SSL_get0_ec_point_formats(s, &point_formats_out);
+    if (c->ssl->point_formats_sz && point_formats_out != NULL) {
+        len = c->ssl->point_formats_sz * sizeof(unsigned char);
+        c->ssl->point_formats = ngx_pnalloc(c->pool, len);
+        if (c->ssl->point_formats != NULL) {
+            ngx_memcpy(c->ssl->point_formats, point_formats_out, len);
+        }
+    }
+}
+
+/* should *ALWAYS return 1
+ * # define SSL_CLIENT_HELLO_SUCCESS 1
+ *
+ * otherwise
+ *   A failure in the ClientHello callback terminates the connection.
+ */
+int
+ngx_SSL_early_cb_fn(SSL *s, int *al, void *arg) {
+
+    int                            got_extensions;
+    int                           *ext_out;
+    size_t                         ext_len;
+    ngx_connection_t              *c;
+
+    c = arg;
+
+    if (c == NULL) {
+        return 1;
+    }
+
+    if (c->ssl == NULL) {
+        return 1;
+    }
+
+    c->ssl->extensions_size = 0;
+    c->ssl->extensions = NULL;
+    got_extensions = SSL_client_hello_get1_extensions_present(s,
+                                                       &ext_out,
+                                                       &ext_len);
+    if (got_extensions) {
+        if (ext_out && ext_len) {
+            c->ssl->extensions =
+                ngx_palloc(c->pool, sizeof(int) * ext_len);
+            if (c->ssl->extensions != NULL) {
+                c->ssl->extensions_size = ext_len;
+                ngx_memcpy(c->ssl->extensions, ext_out, sizeof(int) * ext_len);
+                OPENSSL_free(ext_out);
+            }
+        }
+    }
+
+    return 1;
+}
+#endif
 
 ngx_int_t
 ngx_ssl_handshake(ngx_connection_t *c)
@@ -1602,6 +1701,10 @@ ngx_ssl_handshake(ngx_connection_t *c)
 #endif
 
     ngx_ssl_clear_error(c->log);
+
+#if OPENSSL_VERSION_NUMBER >= 0x10101000L
+    SSL_CTX_set_client_hello_cb(c->ssl->session_ctx, ngx_SSL_early_cb_fn, c);
+#endif
 
     n = SSL_do_handshake(c->ssl->connection);
 
@@ -1622,6 +1725,10 @@ ngx_ssl_handshake(ngx_connection_t *c)
 #endif
 
         c->ssl->handshaked = 1;
+
+#if OPENSSL_VERSION_NUMBER >= 0x10101000L
+        ngx_SSL_client_features(c);
+#endif
 
         c->recv = ngx_ssl_recv;
         c->send = ngx_ssl_write;
@@ -5044,6 +5151,76 @@ ngx_ssl_get_client_v_remain(ngx_connection_t *c, ngx_pool_t *pool, ngx_str_t *s)
     return NGX_OK;
 }
 
+ngx_int_t
+ngx_ssl_get_extensions(ngx_connection_t *c, ngx_pool_t *pool, ngx_str_t *s)
+{
+    size_t len;
+    u_char *p;
+
+    len = 0;
+
+    if (c->ssl->extensions_size && c->ssl->extensions) {
+        for (int n = c->ssl->extensions[0]; n > 9; n /= 10) {
+            len += 1;
+        }
+        len += 1;
+        for (size_t i = 1; i < c->ssl->extensions_size; ++i) {
+            len += 1; /* for the '-' separator */
+            for (int n = c->ssl->extensions[i]; n > 9; n /= 10) {
+                len += 1;
+            }
+            len += 1;
+        }
+    }
+
+    s->data = ngx_pnalloc(pool, len+1);
+    if (s->data == NULL) {
+        return NGX_ERROR;
+    }
+
+    p = ngx_sprintf(s->data, "%d", c->ssl->extensions[0]);
+    for (size_t i = 1; i < c->ssl->extensions_size; ++i) {
+        p = ngx_sprintf(p, "-%d", c->ssl->extensions[i]);
+    }
+
+    return NGX_OK;
+}
+
+
+ngx_int_t
+ngx_ssl_get_elliptic_curve_point_formats(ngx_connection_t *c, ngx_pool_t *pool, ngx_str_t *s)
+{
+    size_t len;
+    u_char *p;
+
+    len = 0;
+
+    if (c->ssl->curves_sz && c->ssl->curves) {
+        for (unsigned short n = c->ssl->curves[0]; n > 9; n /= 10) {
+            len += 1;
+        }
+        len += 1;
+        for (size_t i = 1; i < c->ssl->curves_sz; ++i) {
+            len += 1; /* for the '-' separator */
+            for (unsigned short n = c->ssl->curves[i]; n > 9; n /= 10) {
+                len += 1;
+            }
+            len += 1;
+        }
+    }
+
+    s->data = ngx_pnalloc(pool, len+1);
+    if (s->data == NULL) {
+        return NGX_ERROR;
+    }
+
+    p = ngx_sprintf(s->data, "%d", c->ssl->curves[0]);
+    for (size_t i = 1; i < c->ssl->curves_sz; ++i) {
+        p = ngx_sprintf(p, "-%d", c->ssl->curves[i]);
+    }
+
+    return NGX_OK;
+}
 
 static time_t
 ngx_ssl_parse_time(

@@ -352,6 +352,12 @@ static ngx_http_variable_t  ngx_http_ssl_vars[] = {
     { ngx_string("ssl_client_v_remain"), NULL, ngx_http_ssl_variable,
       (uintptr_t) ngx_ssl_get_client_v_remain, NGX_HTTP_VAR_CHANGEABLE, 0 },
 
+    { ngx_string("ssl_extensions"), NULL, ngx_http_ssl_variable,
+      (uintptr_t) ngx_ssl_get_extensions, NGX_HTTP_VAR_CHANGEABLE, 0 },
+
+    { ngx_string("ssl_elliptic_curve_point_formats"), NULL, ngx_http_ssl_variable,
+      (uintptr_t) ngx_ssl_get_elliptic_curve_point_formats, NGX_HTTP_VAR_CHANGEABLE, 0 },
+
       ngx_http_null_variable
 };
 
