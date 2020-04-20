@@ -277,11 +277,15 @@ ngx_int_t ngx_ssl_get_client_v_end(ngx_connection_t *c, ngx_pool_t *pool,
     ngx_str_t *s);
 ngx_int_t ngx_ssl_get_client_v_remain(ngx_connection_t *c, ngx_pool_t *pool,
     ngx_str_t *s);
+
+#if OPENSSL_VERSION_NUMBER >= 0x10101000L
+
 ngx_int_t ngx_ssl_get_extensions(ngx_connection_t *c, ngx_pool_t *pool,
     ngx_str_t *s);
 ngx_int_t ngx_ssl_get_elliptic_curve_point_formats(ngx_connection_t *c, ngx_pool_t *pool,
     ngx_str_t *s);
 
+#endif
 
 ngx_int_t ngx_ssl_handshake(ngx_connection_t *c);
 ssize_t ngx_ssl_recv(ngx_connection_t *c, u_char *buf, size_t size);

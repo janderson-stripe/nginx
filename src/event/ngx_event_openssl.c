@@ -5151,6 +5151,8 @@ ngx_ssl_get_client_v_remain(ngx_connection_t *c, ngx_pool_t *pool, ngx_str_t *s)
     return NGX_OK;
 }
 
+#if OPENSSL_VERSION_NUMBER >= 0x10101000L
+
 ngx_int_t
 ngx_ssl_get_extensions(ngx_connection_t *c, ngx_pool_t *pool, ngx_str_t *s)
 {
@@ -5158,6 +5160,7 @@ ngx_ssl_get_extensions(ngx_connection_t *c, ngx_pool_t *pool, ngx_str_t *s)
     u_char *p;
 
     len = 0;
+    s->len = 0;
 
     if (c->ssl->extensions_size && c->ssl->extensions) {
         for (int n = c->ssl->extensions[0]; n > 9; n /= 10) {
@@ -5171,18 +5174,19 @@ ngx_ssl_get_extensions(ngx_connection_t *c, ngx_pool_t *pool, ngx_str_t *s)
             }
             len += 1;
         }
-    }
 
-    s->data = ngx_pnalloc(pool, len+1);
-    if (s->data == NULL) {
-        return NGX_ERROR;
-    }
+        s->data = ngx_pnalloc(pool, len+1);
+        if (s->data == NULL) {
+            return NGX_ERROR;
+        }
+        s->len = len;
 
-    p = ngx_sprintf(s->data, "%d", c->ssl->extensions[0]);
-    for (size_t i = 1; i < c->ssl->extensions_size; ++i) {
-        p = ngx_sprintf(p, "-%d", c->ssl->extensions[i]);
-    }
+        p = ngx_sprintf(s->data, "%d", c->ssl->extensions[0]);
+        for (size_t i = 1; i < c->ssl->extensions_size; ++i) {
+            p = ngx_sprintf(p, "-%d", c->ssl->extensions[i]);
+        }
 
+    }
     return NGX_OK;
 }
 
@@ -5194,6 +5198,7 @@ ngx_ssl_get_elliptic_curve_point_formats(ngx_connection_t *c, ngx_pool_t *pool, 
     u_char *p;
 
     len = 0;
+    s->len = 0;
 
     if (c->ssl->curves_sz && c->ssl->curves) {
         for (unsigned short n = c->ssl->curves[0]; n > 9; n /= 10) {
@@ -5207,20 +5212,24 @@ ngx_ssl_get_elliptic_curve_point_formats(ngx_connection_t *c, ngx_pool_t *pool, 
             }
             len += 1;
         }
-    }
 
-    s->data = ngx_pnalloc(pool, len+1);
-    if (s->data == NULL) {
-        return NGX_ERROR;
-    }
+        s->data = ngx_pnalloc(pool, len+1);
+        if (s->data == NULL) {
+            return NGX_ERROR;
+        }
+        s->len = len;
 
-    p = ngx_sprintf(s->data, "%d", c->ssl->curves[0]);
-    for (size_t i = 1; i < c->ssl->curves_sz; ++i) {
-        p = ngx_sprintf(p, "-%d", c->ssl->curves[i]);
+        p = ngx_sprintf(s->data, "%d", c->ssl->curves[0]);
+        for (size_t i = 1; i < c->ssl->curves_sz; ++i) {
+            p = ngx_sprintf(p, "-%d", c->ssl->curves[i]);
+        }
     }
 
     return NGX_OK;
 }
+
+#endif
+
 
 static time_t
 ngx_ssl_parse_time(
