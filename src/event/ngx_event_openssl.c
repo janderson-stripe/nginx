@@ -5200,14 +5200,14 @@ ngx_ssl_get_elliptic_curve_point_formats(ngx_connection_t *c, ngx_pool_t *pool, 
     len = 0;
     s->len = 0;
 
-    if (c->ssl->curves_sz && c->ssl->curves) {
-        for (unsigned short n = c->ssl->curves[0]; n > 9; n /= 10) {
+    if (c->ssl->point_formats_sz && c->ssl->point_formats) {
+        for (unsigned char n = c->ssl->point_formats[0]; n > 9; n /= 10) {
             len += 1;
         }
         len += 1;
-        for (size_t i = 1; i < c->ssl->curves_sz; ++i) {
+        for (size_t i = 1; i < c->ssl->point_formats_sz; ++i) {
             len += 1; /* for the '-' separator */
-            for (unsigned short n = c->ssl->curves[i]; n > 9; n /= 10) {
+            for (unsigned char n = c->ssl->point_formats[i]; n > 9; n /= 10) {
                 len += 1;
             }
             len += 1;
@@ -5219,9 +5219,9 @@ ngx_ssl_get_elliptic_curve_point_formats(ngx_connection_t *c, ngx_pool_t *pool, 
         }
         s->len = len;
 
-        p = ngx_sprintf(s->data, "%d", c->ssl->curves[0]);
-        for (size_t i = 1; i < c->ssl->curves_sz; ++i) {
-            p = ngx_sprintf(p, "-%d", c->ssl->curves[i]);
+        p = ngx_sprintf(s->data, "%d", c->ssl->point_formats[0]);
+        for (size_t i = 1; i < c->ssl->point_formats_sz; ++i) {
+            p = ngx_sprintf(p, "-%d", c->ssl->point_formats[i]);
         }
     }
 
