@@ -23,14 +23,11 @@ typedef struct {
     u_char          buf[4];
     u_char          version[2];
     ngx_str_t       host;
-    ngx_str_t       ecpf;
     ngx_str_t       alpn;
-    ngx_uint_t      cipher_suites_count;
-    u_char         *cipher_suites;
-    ngx_uint_t      supported_groups_count;
-    u_char         *supported_groups;
-    ngx_uint_t      extensions_count;
-    ngx_uint_t     *extensions;
+    ngx_array_t    *cipher_suites;
+    ngx_array_t    *supported_groups;
+    ngx_array_t    *ecpf;
+    ngx_array_t    *extensions;
     ngx_log_t      *log;
     ngx_pool_t     *pool;
     ngx_uint_t      state;
@@ -59,8 +56,8 @@ static void *ngx_stream_ssl_preread_create_srv_conf(ngx_conf_t *cf);
 static char *ngx_stream_ssl_preread_merge_srv_conf(ngx_conf_t *cf, void *parent,
     void *child);
 static ngx_int_t ngx_stream_ssl_preread_init(ngx_conf_t *cf);
+static ngx_int_t ngx_stream_ssl_preread_hex_digit_length(ngx_int_t val);
 
-static ngx_int_t ngx_stream_ssl_preread_hex_digit_length(ngx_int_t d);
 
 static ngx_command_t  ngx_stream_ssl_preread_commands[] = {
 
@@ -271,9 +268,6 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
     dst = ctx->dst;
     p = ctx->buf;
 
-    ctx->extensions = 0;
-    ctx->extensions_count = 0;
-
     for ( ;; ) {
         n = ngx_min((size_t) (last - pos), size);
 
@@ -338,12 +332,12 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
         case sw_cs_len:
             state = sw_cs;
             size = (p[0] << 8) + p[1];
-            ctx->cipher_suites = ngx_palloc(ctx->pool, size);
+            ctx->cipher_suites = ngx_array_create(ctx->pool, size, 1);
             if (ctx->cipher_suites == NULL)  {
                 return NGX_ERROR;
             }
-            dst = ctx->cipher_suites;
-            ctx->cipher_suites_count = size / 2;
+            ctx->cipher_suites->nelts = size;
+            dst = ctx->cipher_suites->elts;
             break;
 
         case sw_cs:
@@ -373,12 +367,8 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
             if (left == 0) {
                 return NGX_OK;
             }
-            if (ctx->extensions == NULL) {
-                ctx->extensions = ngx_palloc(ctx->pool, left);
-                if (ctx->extensions == NULL) {
-                    return NGX_ERROR;
-                }
-            }
+
+            ctx->extensions = ngx_array_create(ctx->pool, 16, sizeof(ngx_uint_t));
 
             state = sw_ext_header;
             dst = p;
@@ -386,8 +376,14 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
             break;
 
         case sw_ext_header:
-            ctx->extensions[ctx->extensions_count] = (p[0] << 8) + p[1];
-            ctx->extensions_count += 1;
+            if (ctx->extensions != NULL)
+            {
+                ngx_uint_t *extension = ngx_array_push(ctx->extensions);
+                if (extension == NULL) {
+                    return NGX_ERROR;
+                }
+                *extension = (p[0] << 8) + p[1];
+            }
 
             if (p[0] == 0 && p[1] == 0 && ctx->host.data == NULL) {
                 /* SNI extension */
@@ -533,11 +529,12 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
         case sw_ecpf_len:
             state = sw_ecpf_data;
             size = p[0];
-            ctx->ecpf.data = ngx_palloc(ctx->pool, size);
-            if (ctx->ecpf.data == NULL) {
+            ctx->ecpf = ngx_array_create(ctx->pool, size, 1);
+            if (ctx->ecpf == NULL) {
                 return NGX_ERROR;
             }
-            dst = ctx->ecpf.data;
+            ctx->ecpf->nelts = size;
+            dst = ctx->ecpf->elts;
             break;
 
         case sw_ecpf_data:
@@ -549,12 +546,13 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
         case sw_sg_len:
             state = sw_sg_data;
             size = (p[0] << 8) + p[1];
-            ctx->supported_groups = ngx_palloc(ctx->pool, size);
+            ctx->supported_groups = ngx_array_create(ctx->pool, size, 1);
             if (ctx->supported_groups == NULL) {
                 return NGX_ERROR;
             }
-            dst = ctx->supported_groups;
-            ctx->supported_groups_count = size / 2;
+            ctx->supported_groups->nelts = size;
+            dst = ctx->supported_groups -> elts;
+            break;
 
         case sw_sg_data:
             state = sw_ext;
@@ -707,22 +705,33 @@ ngx_stream_ssl_preread_ecpf_variable(ngx_stream_session_t *s,
         return NGX_OK;
     }
 
-    size_t len = 0;
-    len += ngx_stream_ssl_preread_hex_digit_length(ctx->ecpf.data[0]);
-    for (size_t i = 1; i < ctx->ecpf.len; i++) {
-        len += 1; /* comma delimiter */
-        len += ngx_stream_ssl_preread_hex_digit_length(ctx->ecpf.data[i]);
-    }
-
     v->valid = 1;
     v->no_cacheable = 0;
     v->not_found = 0;
-    v->data = ngx_palloc(ctx->pool, len);
-    if (v->data == NULL) return NGX_ERROR;
+    v->len = 0;
+
+    if (ctx->ecpf == NULL || ctx->ecpf->nelts == 0) {
+        return NGX_OK;
+    }
+
+    u_char *ecpf = ctx->ecpf->elts;
+    size_t len = 0;
+    len += ngx_stream_ssl_preread_hex_digit_length(ecpf[0]);
+    for (size_t i = 1; i < ctx->ecpf->nelts; ++i) {
+        len += 1 + ngx_stream_ssl_preread_hex_digit_length(ecpf[i]);
+    }
+
+    v->data = ngx_palloc(ctx->pool, len + 1);
+    if (v->data == NULL) {
+        return NGX_ERROR;
+    }
     v->len = len;
-    unsigned char *p = ngx_sprintf(v->data, "%xd", ctx->ecpf.data[0]);
-    for (size_t i = 0; i < ctx->ecpf.len; ++i) {
-        p = ngx_sprintf(p, ",%xd", (int)ctx->ecpf.data[i]);
+
+    ngx_uint_t item = ecpf[0];
+    u_char *p = ngx_sprintf(v->data, "%xd", item);
+    for (size_t i = 0; i < ctx->ecpf->nelts; ++i) {
+        item = ecpf[i];
+        p = ngx_sprintf(p, ",%xd", item);
     }
 
     return NGX_OK;
@@ -741,31 +750,33 @@ ngx_stream_ssl_preread_cipher_suites_variable(ngx_stream_session_t *s,
         return NGX_OK;
     }
 
-    if (ctx->cipher_suites_count == 0) {
-        v->valid = 1;
-        v->no_cacheable = 0;
-        v->not_found = 0;
-        v->len = 0;
+    v->valid = 1;
+    v->no_cacheable = 0;
+    v->not_found = 0;
+    v->len = 0;
+
+    if (ctx->cipher_suites == NULL || ctx->cipher_suites->nelts == 0) {
         return NGX_OK;
     }
 
     size_t len = 0;
-    u_char *cs = ctx->cipher_suites;
+    u_char *cs = ctx->cipher_suites->elts;
     len += ngx_stream_ssl_preread_hex_digit_length((cs[0] << 8) + cs[1]);
-    for (size_t i = 1; i < ctx->cipher_suites_count; i++) {
-        len += 1; /* comma delimiter */
-        len += ngx_stream_ssl_preread_hex_digit_length((cs[i*2] << 8) + cs[(i*2)+1]);
+    for (size_t i = 2; i < ctx->cipher_suites->nelts; i += 2) {
+        len += 1 + ngx_stream_ssl_preread_hex_digit_length((cs[i] << 8) + cs[i + 1]);
     }
 
-    v->valid = 1;
-    v->no_cacheable = 0;
-    v->not_found = 0;
-    v->data = ngx_palloc(ctx->pool, len);
-    if (v->data == NULL) return NGX_ERROR;
+    v->data = ngx_palloc(ctx->pool, len + 1);
+    if (v->data == NULL) {
+        return NGX_ERROR;
+    }
     v->len = len;
-    unsigned char *p = ngx_sprintf(v->data, "%xd", (cs[0] << 8) + cs[1]);
-    for (size_t i = 0; i < ctx->cipher_suites_count; ++i) {
-        p = ngx_sprintf(p, ",%xd", (cs[2*i] << 8) + cs[(2*i)+1]);
+
+    ngx_uint_t item = (cs[0] << 8) + cs[1];
+    u_char *p = ngx_sprintf(v->data, "%xd", item);
+     for (size_t i = 2; i < ctx->cipher_suites->nelts; i += 2) {
+        item = (cs[i] << 8) + cs[i + 1];
+        p = ngx_sprintf(p, ",%xd", item);
     }
 
     return NGX_OK;
@@ -784,30 +795,31 @@ ngx_stream_ssl_preread_extensions_variable(ngx_stream_session_t *s,
         return NGX_OK;
     }
 
-    if (ctx->extensions_count == 0) {
-        v->valid = 1;
-        v->no_cacheable = 0;
-        v->not_found = 0;
-        v->len = 0;
-        return NGX_OK;
-    }
-
-    size_t len = 0;
-    len += ngx_stream_ssl_preread_hex_digit_length(ctx->extensions[0]);
-    for (size_t i = 1; i < ctx->extensions_count; i++) {
-        len += 1; /* comma delimiter */
-        len += ngx_stream_ssl_preread_hex_digit_length(ctx->extensions[i]);
-    }
-
     v->valid = 1;
     v->no_cacheable = 0;
     v->not_found = 0;
-    v->data = ngx_palloc(ctx->pool, len);
-    if (v->data == NULL) return NGX_ERROR;
+    v->len = 0;
+
+    if (ctx->extensions == NULL || ctx->extensions->nelts == 0) {
+        return NGX_OK;
+    }
+
+    ngx_uint_t *ext = ctx->extensions->elts;
+    size_t len = 0;
+    len += ngx_stream_ssl_preread_hex_digit_length(ext[0]);
+    for (size_t i = 1; i < ctx->extensions->nelts; ++i) {
+        len += 1 + ngx_stream_ssl_preread_hex_digit_length(ext[i]);
+    }
+
+    v->data = ngx_palloc(ctx->pool, len + 1);
+    if (v->data == NULL) {
+        return NGX_ERROR;
+    }
     v->len = len;
-    unsigned char *p = ngx_sprintf(v->data, "%xd", ctx->extensions[0]);
-    for (size_t i = 0; i < ctx->extensions_count; ++i) {
-        p = ngx_sprintf(p, ",%xd", (int)ctx->extensions[i]);
+
+    u_char *p = ngx_sprintf(v->data, "%xd", ext[0]);
+    for (size_t i = 1; i < ctx->extensions->nelts; ++i) {
+        p = ngx_sprintf(p, ",%xd", ext[i]);
     }
 
     return NGX_OK;
@@ -826,31 +838,33 @@ ngx_stream_ssl_preread_supported_groups_variable(ngx_stream_session_t *s,
         return NGX_OK;
     }
 
-    if (ctx->cipher_suites_count == 0) {
-        v->valid = 1;
-        v->no_cacheable = 0;
-        v->not_found = 0;
-        v->len = 0;
+    v->valid = 1;
+    v->no_cacheable = 0;
+    v->not_found = 0;
+    v->len = 0;
+
+    if (ctx->supported_groups == NULL || ctx->supported_groups->nelts == 0) {
         return NGX_OK;
     }
 
     size_t len = 0;
-    u_char *sg = ctx->supported_groups;
+    u_char *sg = ctx->supported_groups->elts;
     len += ngx_stream_ssl_preread_hex_digit_length((sg[0] << 8) + sg[1]);
-    for (size_t i = 1; i < ctx->supported_groups_count; i++) {
-        len += 1; /* comma delimiter */
-        len += ngx_stream_ssl_preread_hex_digit_length((sg[i*2] << 8) + sg[(i*2)+1] );
+    for (size_t i = 2; i < ctx->supported_groups->nelts; i += 2) {
+        len += 1 + ngx_stream_ssl_preread_hex_digit_length((sg[i] << 8) + sg[i + 1]);
     }
 
-    v->valid = 1;
-    v->no_cacheable = 0;
-    v->not_found = 0;
-    v->data = ngx_palloc(ctx->pool, len);
-    if (v->data == NULL) return NGX_ERROR;
+    v->data = ngx_palloc(ctx->pool, len + 1);
+    if (v->data == NULL) {
+        return NGX_ERROR;
+    }
     v->len = len;
-    unsigned char *p = ngx_sprintf(v->data, "%xd", (sg[0] << 8) + sg[1]);
-    for (size_t i = 0; i < ctx->supported_groups_count; ++i) {
-        p = ngx_sprintf(p, ",%xd", (sg[i*2] << 8) + sg[(i*2) + 1]);
+
+    ngx_uint_t item = (sg[0] << 8) + sg[1];
+    u_char *p = ngx_sprintf(v->data, "%xd", item);
+    for (size_t i = 2; i < ctx->supported_groups->nelts; i += 2) {
+        item = (sg[i] << 8) + sg[i + 1];
+        p = ngx_sprintf(p, ",%xd", item);
     }
 
     return NGX_OK;
@@ -921,14 +935,15 @@ ngx_stream_ssl_preread_init(ngx_conf_t *cf)
     return NGX_OK;
 }
 
+
 static ngx_int_t
-ngx_stream_ssl_preread_hex_digit_length(ngx_int_t d)
-{
-    ngx_int_t len = 1;
-    if (d < 0) {
-        d *= -1;
-        len += 1;
+ngx_stream_ssl_preread_hex_digit_length(ngx_int_t val) {
+    if (val == 0) return 1;
+
+    ngx_int_t len = 0;
+    for (ngx_uint_t uval = (ngx_uint_t)val; uval != 0; uval >>= 4) {
+        ++len;
     }
-    for (; d > 15; d /= 16) ++len;
+
     return len;
 }
